@@ -1,0 +1,263 @@
+# ==========================================================
+# Vertex Lab - Configuración QLoRA
+# Ajustada para GTX 1660 Ti (Turing, 6 GB VRAM, SIN bf16) en Windows 11
+# Todas las rutas son relativas a la raíz del repo (F:\vertex-lab)
+# ==========================================================
+
+model:
+  # Modelo con pesos COMPLETOS (bitsandbytes lo cuantiza a 4-bit al cargar).
+  # No uses variantes "-bnb-4bit": el merge (03) necesita los pesos originales.
+  # Base definitiva: Qwen3-4B-Instruct-2507 (Apache 2.0, uso comercial libre).
+  #   Para pruebas rápidas: Qwen/Qwen2.5-1.5B-Instruct.
+  #   Probó la tubería: Qwen/Qwen2.5-3B-Instruct (licencia qwen-research, NO comercial).
+  base_model_name: "Qwen/Qwen3-4B-Instruct-2507"
+  max_seq_length: 1536             # 2048 llenó los 6 GB (vocabulario de 152K: los logits pesan >1 GB) y activó el sysmem fallback
+  load_in_4bit: true
+  attn_implementation: "sdpa"      # "eager" si ves NaN en la loss
+
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+dataset:
+  raw_dir: "data/raw"                              # .json / .jsonl de entrada
+  train_path: "data/processed/vertex_train_dataset.jsonl"
+  eval_path: "data/processed/vertex_eval_dataset.jsonl"
+  eval_ratio: 0.1                                  # se aplica solo si hay >= 20 muestras
+  max_eval_samples: 100                            # evaluar 364 muestras tarda ~27 min; 100 bastan (~7 min)
+  train_on_assistant_only: true                    # la loss solo cuenta la respuesta del asistente
+  no_system_ratio: 0.4                             # 40% de muestras sin system prompt -> identidad en los pesos
+
+prompt:
+  system_prompt_path: "prompts/vertex_core.jinja2"
+
+training:
+  output_dir: "outputs/checkpoints"
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8                   # batch efectivo = 8
+  num_train_epochs: 1                              # 83.5 s/paso en 1660 Ti con Qwen3-4B: 1 época ~9.5 h, 2 épocas ~19 h
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  weight_decay: 0.0
+  fp16: true                                       # Turing: fp16 SÍ
+  bf16: false                                      # Turing: bf16 NO (sm_75)
+  optim: "adamw_torch"                             # LoRA tiene pocos params; no hace falta 8-bit
+  gradient_checkpointing: true
+  logging_steps: 1
+  save_strategy: "steps"                          # checkpoint cada save_steps: si algo falla, --resume retoma
+  save_steps: 50                                   # ~70 min en la 1660 Ti
+  eval_strategy: "epoch"                           # evaluar solo al final (cada eval cuesta ~7 min)
+  save_total_limit: 2
+  report_to: "none"                                # "tensorboard" si lo instalas
+  seed: 342
+
+outputs:
+  adapter_dir: "outputs/adapters/vertex-core-lora"
+  merged_dir: "outputs/models/vertex-core-merged"
+  gguf_dir: "outputs/models/gguf"
+  quantization: "q4_k_m"                           # q4_k_m | q5_k_m | q8_0 | f16
+
+llama_cpp:
+  dir: "tools/llama.cpp"                           # lo crea tools/setup_llamacpp.ps1
+
+synth:
+  # Generador local (scripts/dataset_builder.py). Solo material PROPIO de Vertex Coders.
+  # Fuera: proyectos de clientes, documentos legales/oficiales, datos personales.
+  sources:
+    - "F:/book-mcp-graphql"
+    - "F:/libro-mcp-ps"
+    - "D:/libro_codigo_vivo"
+    - "F:/Sculpting"
+    - "F:/vertex-soc-mcp"
+    - "F:/vertex-net-mcp"
+    - "F:/vertex-host-forensics-mcp"
+    - "F:/powershell-mcp-agent"
+    - "F:/vertex-sentinel-redteam"
+    - "F:/vertex-auto-auditor-backend"
+    - "F:/vertex-reasoning-engine"
+    - "F:/vertex-oracle-core"
+    # Fase 2 (se procesan al relanzar sin --reset cuando termine la corrida actual)
+    - "F:/vertex-kontia"
+    - "F:/vertex-payroll-core"
+    - "F:/civix-backend"
+    - "F:/civix-frontend"
+    - "F:/vertex-auditor-console"
+    - "F:/seismic-alert"
+    - "F:/seismic-android"
+    - "F:/LinguaWear"
+    - "F:/vision-core-mcp"
+    - "F:/vertex-voice-platform"
+  extensions: [".md", ".txt", ".py", ".kt", ".ts", ".ps1"]
+  max_file_kb: 300
+  chunk_chars: 3000
+  pairs_per_chunk: 3
+  blocklist: ["163c296d", "6ec7d2e9"]   # IDs de tenants de Kontia; añade nombres de clientes/personas que NUNCA deben entrar
+  ollama_url: "http://127.0.0.1:11434"
+  teacher_model: "qwen3:8b"     # Apache 2.0, cabe en 6 GB (Q4). En Ollama: ollama pull qwen3:8b
+  timeout_s: 180
+  out_file: "data/raw/synth_from_sources.jsonl"
+  review_file: "data/synth_review.md"
+
+stages:
+  # Etapa 2: refuerzo de identidad (01b_identity_mix.py + 02_trainer.py --stage identity).
+  # Parte del adaptador v1 y guarda la v2 aparte: la v1 no se toca.
+  identity:
+    identity_files: ["data/raw/identity.json"]
+    identity_repeat: 12                # cada ejemplo de identidad se ve 12 veces
+    identity_system_ratio: 0.3         # 70% SIN system prompt: la identidad debe vivir en los pesos
+    replay_samples: 400                # pares técnicos ya vistos, para no olvidar lo técnico
+    train_path: "data/processed/vertex_identity_stage.jsonl"
+    eval_path: null
+    init_adapter: "outputs/adapters/vertex-core-lora"
+    adapter_dir: "outputs/adapters/vertex-core-lora-v2"
+    training:
+      output_dir: "outputs/checkpoints_identity"
+      learning_rate: 1.0e-4            # la mitad: refinar, no reentrenar
+      num_train_epochs: 1
+      save_steps: 40
+
+  # Etapa 3: honestidad sobre el origen + "no lo se" (cura la alucinación del examen v2).
+  # Parte de la v2 y guarda la v3 aparte.
+  honesty:
+    identity_files: ["data/raw/identity.json", "data/raw/idk_examples.jsonl"]
+    identity_repeat: 8                 # menos que en la etapa 2: solo reforzar lo nuevo, no re-machacar
+    identity_system_ratio: 0.3
+    replay_samples: 400
+    train_path: "data/processed/vertex_honesty_stage.jsonl"
+    eval_path: null
+    init_adapter: "outputs/adapters/vertex-core-lora-v2"
+    adapter_dir: "outputs/adapters/vertex-core-lora-v3"
+    training:
+      output_dir: "outputs/checkpoints_honesty"
+      learning_rate: 8.0e-5
+      num_train_epochs: 1
+      save_steps: 40
+
+  # Etapa v4: UNA sola etapa desde el modelo base con todo mezclado (identidad + no-se + tecnico).
+  # init_adapter vacio = entrena desde cero sobre la base, no encadena sobre v2/v3.
+  v4:
+    identity_files: ["data/raw/identity.json"]
+    identity_repeat: 6                # 80 ejemplos x 6 = 480
+    identity_system_ratio: 0.25       # 75% sin system prompt: identidad en los pesos
+    idk_files: ["data/raw/idk_examples.jsonl"]
+    idk_repeat: 6                     # 23 ejemplos x 6 = 138
+    idk_system_ratio: 0.5
+    train_path: "data/processed/vertex_v4_dataset.jsonl"
+    eval_path: null
+    init_adapter: null               # DESDE LA BASE
+    adapter_dir: "outputs/adapters/vertex-core-lora-v4"
+    max_seq_length: 1024             # v4: 1024 (no 1536) para que cada paso corra rapido y no desborde a RAM
+    training:
+      output_dir: "outputs/checkpoints_v4"
+      learning_rate: 2.0e-4          # desde cero: lr normal, no reducido
+      num_train_epochs: 1
+      save_steps: 100
+
+  # Etapa fix_code: retoque corto desde la v4 para curar el reflejo de negarse a escribir codigo.
+  # Refuerza idk_examples.jsonl (ya corregido: 8 ejemplos de "escribe funcion -> codigo" + "no lo se"
+  # acotado a codigo ajeno no visto) e identidad, con system prompt casi siempre (uso real).
+  fix_code:
+    identity_files: ["data/raw/idk_examples.jsonl", "data/raw/identity.json"]
+    identity_repeat: 10               # 109 ejemplos x 10 = 1090 (peso fuerte a lo que se corrige)
+    identity_system_ratio: 0.7        # 70% CON system prompt: asi lo usa la gente
+    replay_samples: 300               # algo de tecnico para no olvidar
+    train_path: "data/processed/vertex_fixcode_stage.jsonl"
+    eval_path: null
+    init_adapter: "outputs/adapters/vertex-core-lora-v4"
+    adapter_dir: "outputs/adapters/vertex-core-lora-v5"
+    max_seq_length: 1024
+    training:
+      output_dir: "outputs/checkpoints_fixcode"
+      learning_rate: 1.0e-4
+      num_train_epochs: 2             # 2 epocas: el set es chico, conviene que lo asiente
+      save_steps: 100
+
+  # Etapa fix_code_v2: MISMO objetivo que fix_code pero calibrada al reves para NO memorizar.
+  # La v5 memorizo (loss 0.002) por 20 exposiciones por ejemplo. Aqui: pocas repeticiones, 1 epoca, lr suave.
+  fix_code_v2:
+    identity_files: ["data/raw/idk_examples.jsonl", "data/raw/identity.json"]
+    identity_repeat: 3                # 109 x 3 = 327 (cada ejemplo se ve 3 veces, no 20)
+    identity_system_ratio: 0.6
+    replay_samples: 450               # mas tecnico para diluir y forzar generalizacion
+    train_path: "data/processed/vertex_fixcode2_stage.jsonl"
+    eval_path: null
+    init_adapter: "outputs/adapters/vertex-core-lora-v4"
+    adapter_dir: "outputs/adapters/vertex-core-lora-v6"
+    max_seq_length: 1024
+    training:
+      output_dir: "outputs/checkpoints_fixcode2"
+      learning_rate: 5.0e-5           # la mitad: retoque suave, evita memorizar
+      num_train_epochs: 1             # 1 epoca (la v5 uso 2 y memorizo)
+      save_steps: 100
+
+  # Etapa v7: DESDE LA BASE (no encima de v4, que ya tiene el sesgo). Dataset en contraste:
+  # identidad + "no lo se" corregido + 25 ejemplos de "escribe codigo". El objetivo es que la palabra
+  # "valida/escribe" quede asociada a ENTREGAR codigo, no a pedir contexto. Calibrada para no memorizar.
+  v7:
+    identity_files: ["data/raw/identity.json", "data/raw/idk_examples.jsonl", "data/raw/code_gen_examples.jsonl"]
+    identity_repeat: 4                # (80+29+25)=134 x 4 = 536 (variedad alta, pocas repeticiones)
+    identity_system_ratio: 0.4
+    replay_samples: 500
+    train_path: "data/processed/vertex_v7_dataset.jsonl"
+    eval_path: null
+    init_adapter: null               # DESDE LA BASE, para no heredar el sesgo de la v4
+    adapter_dir: "outputs/adapters/vertex-core-lora-v7"
+    max_seq_length: 1024
+    training:
+      output_dir: "outputs/checkpoints_v7"
+      learning_rate: 2.0e-4          # desde cero: lr normal
+      num_train_epochs: 1
+      save_steps: 100
+
+  # Etapa v8: DESDE LA BASE, todo lo de la v7 MAS tool calling (lo que faltaba en v1-v7).
+  # El dataset lo arma 01f_v8_mix.py (mezcla text de tool calling + messages del resto).
+  # Contexto 1536 porque los ejemplos de tool calling con <tools> son mas largos.
+  v8:
+    identity_files: ["data/raw/identity.json", "data/raw/idk_examples.jsonl", "data/raw/code_gen_examples.jsonl"]
+    identity_repeat: 4
+    identity_system_ratio: 0.4
+    toolcall_repeat: 5               # 21 ejemplos x 5 = 105 muestras de tool calling
+    tech_system_ratio: 0.9
+    replay_samples: 500
+    train_path: "data/processed/vertex_v8_dataset.jsonl"
+    eval_path: null
+    init_adapter: null               # DESDE LA BASE
+    adapter_dir: "outputs/adapters/vertex-core-lora-v8"
+    max_seq_length: 1536             # tool calling con <tools> ocupa mas; 1536 para no truncar
+    training:
+      output_dir: "outputs/checkpoints_v8"
+      learning_rate: 2.0e-4
+      num_train_epochs: 1
+      save_steps: 100
+
+  # Etapa v9: DESDE LA BASE. Todo lo de la v8 (identidad, codigo, tool calling REFORZADO) MAS
+  # razonamiento de pentesting generalizado (sin flags) y tecnicas por maquina (CSV). Objetivo:
+  # que razone como pentester y use tools consistente. El dataset lo arma 01i_v9_mix.py.
+  v9:
+    identity_files: ["data/raw/identity.json", "data/raw/idk_examples.jsonl", "data/raw/code_gen_examples.jsonl"]
+    identity_repeat: 4
+    identity_system_ratio: 0.4
+    toolcall_repeat: 8               # reforzado vs v8 (era 5): la consistencia de tools fallaba
+    pentest_repeat: 8               # 15 ejemplos x 8 = 120 muestras de razonamiento
+    csv_samples: 180                # muestra de las 362 tecnicas-por-maquina (no todas, no dominar)
+    tech_system_ratio: 0.9
+    replay_samples: 450
+    train_path: "data/processed/vertex_v9_dataset.jsonl"
+    eval_path: null
+    init_adapter: null               # DESDE LA BASE
+    adapter_dir: "outputs/adapters/vertex-core-lora-v10"   # v10: balance de pentesting corregido (no pisa v9)
+    max_seq_length: 1536
+    training:
+      output_dir: "outputs/checkpoints_v9"
+      learning_rate: 2.0e-4
+      num_train_epochs: 1
+      save_steps: 100
+
+ollama:
+  model_name: "vertex-core"
+  temperature: 0.3
+  num_ctx: 4096

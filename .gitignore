@@ -1,0 +1,13 @@
+venv/
+venv_bak_*/
+.hf_cache/
+__pycache__/
+outputs/
+tools/llama.cpp/
+tools/_tmp_llamacpp/
+Modelfile
+*.gguf
+*.safetensors
+data/
+py
+python
